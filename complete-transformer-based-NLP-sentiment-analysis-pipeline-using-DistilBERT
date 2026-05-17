@@ -1,0 +1,217 @@
+# ============================================================
+# NLP SENTIMENT ANALYSIS USING DISTILBERT (OPTIMIZED & FIXED)
+# ============================================================
+
+# 1. INSTALLATION
+# Added 'accelerate' which is required by modern Hugging Face Trainers
+!pip install -q --upgrade transformers datasets scikit-learn matplotlib accelerate
+
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+
+# =========================
+# DATA PREPARATION
+# =========================
+print("Loading IMDB dataset...")
+dataset = load_dataset("imdb")
+
+# Create subsets and keep 'text' intact in test_dataset for error analysis later
+train_dataset = dataset["train"].shuffle(seed=42).select(range(1000))
+test_dataset = dataset["test"].shuffle(seed=42).select(range(500))
+
+tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+def tokenize_function(examples):
+    return tokenizer(examples["text"], padding="max_length", truncation=True)
+
+print("Tokenizing data...")
+tokenized_train = train_dataset.map(tokenize_function, batched=True)
+tokenized_test = test_dataset.map(tokenize_function, batched=True)
+
+# Rename 'label' to 'labels' as expected by the Trainer
+tokenized_train = tokenized_train.rename_column("label", "labels")
+tokenized_test = tokenized_test.rename_column("label", "labels")
+
+# Set standard format for PyTorch
+tokenized_train.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+tokenized_test.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
+
+# =========================
+# MODEL SETUP
+# =========================
+model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=2)
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, predictions, average="binary")
+    acc = accuracy_score(labels, predictions)
+    return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
+
+training_args = TrainingArguments(
+    output_dir="./results",
+    learning_rate=2e-5,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    num_train_epochs=1,
+    weight_decay=0.01,
+    eval_strategy="epoch",
+    save_strategy="no",
+    report_to="none"
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_train,
+    eval_dataset=tokenized_test,
+    compute_metrics=compute_metrics,
+)
+
+# =========================
+# TRAINING & EVALUATION
+# =========================
+print("\nStarting training...")
+trainer.train()
+
+print("\nEvaluating...")
+results = trainer.evaluate()
+print(f"Final Accuracy: {results['eval_accuracy']:.4f}")
+
+# =========================
+# PREDICTION HELPER
+# =========================
+def predict_sentiment(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(model.device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    probs = F.softmax(outputs.logits, dim=1)
+    pred_idx = torch.argmax(probs, dim=1).item()
+    conf = probs[0][pred_idx].item()
+
+    sentiment = "Positive" if pred_idx == 1 else "Negative"
+    return sentiment, conf
+
+# Test it
+sample_text = "The cinematography was breathtaking, but the plot felt hollow."
+label, score = predict_sentiment(sample_text)
+print(f"\nSample Prediction: '{sample_text}'")
+print(f"Result: {label} ({score:.2%} confidence)")
+
+# =========================
+# ERROR ANALYSIS (FIXED)
+# =========================
+print("\nGenerating predictions for Error Analysis...")
+preds_output = trainer.predict(tokenized_test)
+y_pred = np.argmax(preds_output.predictions, axis=1)
+y_true = preds_output.label_ids
+
+errors = np.where(y_pred != y_true)[0]
+print(f"Total errors: {len(errors)} out of {len(y_true)}")
+
+print("\n--- Top Misclassified Reviews ---")
+# Safely pull up to 3 errors depending on how many were generated
+num_errors_to_show = min(3, len(errors))
+
+for i in range(num_errors_to_show):
+    idx = errors[i]
+    # FIX: Pull raw string text from unformatted 'test_dataset' using the matching index
+    print(f"\nText: {test_dataset[int(idx)]['text'][:200]}...")
+    print(f"True: {'Pos' if y_true[idx]==1 else 'Neg'} | Predicted: {'Pos' if y_pred[idx]==1 else 'Neg'}")
+
+
+
+
+
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 52.8/52.8 kB 2.6 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.6/10.6 MB 75.4 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.0/529.0 kB 14.4 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.9/8.9 MB 64.0 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.8/8.8 MB 69.8 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 48.9/48.9 MB 14.6 MB/s eta 0:00:00
+Loading IMDB dataset...
+README.md: 
+ 7.81k/? [00:00<00:00, 746kB/s]
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+plain_text/train-00000-of-00001.parquet: 100%
+ 21.0M/21.0M [00:00<00:00, 105MB/s]
+plain_text/test-00000-of-00001.parquet: 100%
+ 20.5M/20.5M [00:00<00:00, 102MB/s]
+plain_text/unsupervised-00000-of-00001.p(…): 100%
+ 42.0M/42.0M [00:00<00:00, 68.5MB/s]
+Generating train split: 100%
+ 25000/25000 [00:00<00:00, 68742.80 examples/s]
+Generating test split: 100%
+ 25000/25000 [00:00<00:00, 121410.27 examples/s]
+Generating unsupervised split: 100%
+ 50000/50000 [00:00<00:00, 154851.95 examples/s]
+config.json: 100%
+ 483/483 [00:00<00:00, 53.0kB/s]
+tokenizer_config.json: 100%
+ 48.0/48.0 [00:00<00:00, 6.19kB/s]
+vocab.txt: 
+ 232k/? [00:00<00:00, 12.5MB/s]
+tokenizer.json: 
+ 466k/? [00:00<00:00, 19.9MB/s]
+Tokenizing data...
+Map: 100%
+ 1000/1000 [00:00<00:00, 1193.82 examples/s]
+Map: 100%
+ 500/500 [00:00<00:00, 1395.42 examples/s]
+model.safetensors: 100%
+ 268M/268M [00:01<00:00, 231MB/s]
+Loading weights: 100%
+ 100/100 [00:00<00:00, 6633.83it/s]
+[transformers] DistilBertForSequenceClassification LOAD REPORT from: distilbert-base-uncased
+Key                     | Status     | 
+------------------------+------------+-
+vocab_layer_norm.weight | UNEXPECTED | 
+vocab_transform.bias    | UNEXPECTED | 
+vocab_transform.weight  | UNEXPECTED | 
+vocab_projector.bias    | UNEXPECTED | 
+vocab_layer_norm.bias   | UNEXPECTED | 
+classifier.weight       | MISSING    | 
+classifier.bias         | MISSING    | 
+pre_classifier.bias     | MISSING    | 
+pre_classifier.weight   | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+
+Starting training...
+ [63/63 41:40, Epoch 1/1]
+Epoch	Training Loss	Validation Loss	Accuracy	F1	Precision	Recall
+1	No log	0.420402	0.872000	0.871486	0.861111	0.882114
+
+Evaluating...
+ [32/32 04:42]
+Training Loss	Validation Loss	Epoch	Accuracy	F1	Precision	Recall
+No log	0.420402	1	0.872000	0.871486	0.861111	0.882114
+Final Accuracy: 0.8720
+
+Sample Prediction: 'The cinematography was breathtaking, but the plot felt hollow.'
+Result: Negative (58.68% confidence)
+
+Generating predictions for Error Analysis...
+Total errors: 64 out of 500
+
+--- Top Misclassified Reviews ---
+
+Text: These days, writers, directors and producers are relying more and more on the "surprise" ending. The old art of bringing a movie to closure, taking all of the information we have learned through out t...
+True: Neg | Predicted: Pos
+
+Text: A holiday on a boat, a married couple, an angry waiter and a shipwreck is the reason to this films beginning.<br /><br />I like boobs. No question about that. But when the main character allies with w...
+True: Neg | Predicted: Pos
+
+Text: Coming from Kiarostami, this art-house visual and sound exposition is a surprise. For a director known for his narratives and keen observation of humans, especially children, this excursion into minim...
+True: Neg | Predicted: Pos
